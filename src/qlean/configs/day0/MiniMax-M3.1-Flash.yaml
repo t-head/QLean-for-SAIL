@@ -1,0 +1,51 @@
+quant_stage:
+  quantization_modifiers:
+    GeneralQuantEngineModifier:
+      num_gpus: 0
+      resume: true
+      force_rerun: false
+
+      config_writer: compressed_tensors
+      primary_scheme: W8A8
+      sglang_wa: false
+      dequant_dtype: fp32
+      nvfp4_group_size: 16
+      verify: bound
+
+      regions:
+        - name: ignore
+          match:
+            - "*lm_head*"
+            - "*embed_tokens*"
+            - "*norm.*"
+            - "*block_sparse_moe.gate.*"
+            - "*e_score_correction_bias"
+            - "*multi_modal_projector.*"
+            - "*patch_merge_mlp.*"
+            - "vision_tower.*"
+
+        - name: experts
+          match:
+            - "*.block_sparse_moe.experts.*.w1.weight_packed"
+            - "*.block_sparse_moe.experts.*.w2.weight_packed"
+            - "*.block_sparse_moe.experts.*.w3.weight_packed"
+          src: NVFP4
+          dst: W8A8
+
+        - name: shared_experts
+          match: "*block_sparse_moe.shared_experts.*.weight"
+          src: MXFP8
+          dst: W8A8
+
+        - name: attn
+          match: "*.self_attn.*.weight"
+          src: MXFP8
+          dst: W8A8
+
+        - name: dense_mlp
+          match: "*.mlp.*.weight"
+          src: MXFP8
+          dst: W8A8
+
+        - name: fallback
+          match: "*"

@@ -60,7 +60,7 @@ CONSUMED_SOURCE_SUFFIXES = {
     "nvfp4": ("_scale", "_scale_2"),
     "int4": ("weight_scale", "weight_shape"),
     "mxfp4": (".scale", "weight_scale", "weight_offset", "weight_shape", "scale_bias"),
-    "mxfp8": (".scale", "weight_scale"),
+    "mxfp8": (".scale", "weight_scale", "_scale_inv"),
 }
 
 _ENGINE_DEFAULT_SCALE_SUFFIXES = ("_scale_inv", ".scale")

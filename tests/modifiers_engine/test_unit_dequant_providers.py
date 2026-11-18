@@ -55,7 +55,9 @@ def test_fp8_provider_blocks_tail_and_experts(block_size, batched, target):
 @pytest.mark.cpu
 @pytest.mark.parametrize("group_size", [16, 32])
 @pytest.mark.parametrize("target", ["fp32", "bf16"])
-def test_nvfp4_local_global_scale_and_tail(group_size, target):
+@pytest.mark.parametrize("name", ["x.weight", "x.weight_packed"])
+@pytest.mark.parametrize("global_name", ["x.weight_scale_2", "x.weight_global_scale"])
+def test_nvfp4_local_global_scale_and_tail(group_size, target, name, global_name):
     import torch
     from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
 
@@ -65,26 +67,48 @@ def test_nvfp4_local_global_scale_and_tail(group_size, target):
     groups = (34 + group_size - 1) // group_size
     local = torch.tensor([[0.5, 1, 2][:groups], [2, 4, 8][:groups]], dtype=torch.float32)
     global_scale = torch.tensor(0.5, dtype=torch.float32)
-    ctx = _context({"x.weight_scale": local, "x.weight_scale_2": global_scale},
+    ctx = _context({"x.weight_scale": local, global_name: global_scale},
                    dequant_dtype=target, nvfp4_group_size=group_size)
     expected = [[v * float(local[r, c // group_size]) * 0.5 for c, v in enumerate(values)]
                 for r in range(2)]
     before, local_before, global_before = raw.clone(), local.clone(), global_scale.clone()
-    actual = nvfp4(ctx, "x.weight", raw)
+    actual = nvfp4(ctx, name, raw)
     dtype = torch.float32 if target == "fp32" else torch.bfloat16
     torch.testing.assert_close(actual, torch.tensor(expected, dtype=dtype), rtol=0, atol=0)
-    assert ctx.reads == ["x.weight_scale", "x.weight_scale_2"]
+    assert ctx.reads == ["x.weight_scale", global_name]
     torch.testing.assert_close(raw, before, rtol=0, atol=0)
     torch.testing.assert_close(local, local_before, rtol=0, atol=0)
     torch.testing.assert_close(global_scale, global_before, rtol=0, atol=0)
 
 
+@pytest.mark.cpu
+@pytest.mark.parametrize("name", ["x.weight", "x.weight_packed"])
+def test_nvfp4_global_scale_legacy_name_takes_priority(name):
+    import torch
+    from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
+
+    tensors = {"x.weight_scale": torch.full((1, 1), 0.5),
+               "x.weight_scale_2": torch.tensor(0.25),
+               "x.weight_global_scale": torch.tensor(2.0)}
+    ctx = _context(tensors, dequant_dtype="fp32", nvfp4_group_size=16)
+    raw = torch.full((1, 8), 0xF1, dtype=torch.uint8)
+    actual = nvfp4(ctx, name, raw)
+    expected = torch.tensor([[0.0625, -0.75] * 8], dtype=torch.float32)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert ctx.reads == ["x.weight_scale", "x.weight_scale_2"]
+
+
 @pytest.mark.gpu
-@pytest.mark.parametrize("kind", ["mxfp4", "mxfp8"])
+@pytest.mark.parametrize("kind, scale_name", [
+    ("mxfp4", "x.scale"),
+    ("mxfp8", "x.scale"),
+    ("mxfp8", "x.weight_scale"),
+    ("mxfp8", "x.weight_scale_inv"),
+])
 @pytest.mark.parametrize("storage", ["uint8", "int8"])
 @pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize("target", ["fp32", "bf16"])
-def test_mxfp_provider_row_scales_and_tail(kind, storage, batched, target):
+def test_mxfp_provider_row_scales_and_tail(kind, scale_name, storage, batched, target):
     import torch
     from qlean.modifiers_engine._runtime.dequant_providers import PROVIDERS
 
@@ -100,12 +124,12 @@ def test_mxfp_provider_row_scales_and_tail(kind, storage, batched, target):
                             dtype=torch.float32, device="cuda")
     if batched:
         raw, scale, expected = (torch.stack((x, x)) for x in (raw, scale, expected))
-    ctx = _context({"x.scale": scale}, dequant_dtype=target)
+    ctx = _context({scale_name: scale}, dequant_dtype=target)
     before, scale_before = raw.view(torch.uint8).clone(), scale.view(torch.uint8).clone()
     actual = PROVIDERS[kind](ctx, "x.weight", raw)
     dtype = torch.float32 if target == "fp32" else torch.bfloat16
     torch.testing.assert_close(actual, expected.to(dtype), rtol=0, atol=0)
-    assert ctx.reads == ["x.scale"]
+    assert ctx.reads == [scale_name]
     torch.testing.assert_close(raw.view(torch.uint8), before, rtol=0, atol=0)
     torch.testing.assert_close(scale.view(torch.uint8), scale_before, rtol=0, atol=0)
 
@@ -180,11 +204,14 @@ def test_mxfp_rejects_numeric_scale_bytes(kind):
 
 
 @pytest.mark.cpu
-def test_nvfp4_missing_global_scale_fails_before_read():
+@pytest.mark.parametrize("name", ["x.weight", "x.weight_packed"])
+def test_nvfp4_missing_global_scale_fails_before_read(name):
     import torch
     from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
 
     ctx = _context({"x.weight_scale": torch.ones((2, 1), dtype=torch.float32)})
-    with pytest.raises(ValueError, match="missing global scale"):
-        nvfp4(ctx, "x.weight", torch.zeros((2, 8), dtype=torch.uint8))
+    with pytest.raises(ValueError, match="missing global scale") as error:
+        nvfp4(ctx, name, torch.zeros((2, 8), dtype=torch.uint8))
+    assert "x.weight_scale_2" in str(error.value)
+    assert "x.weight_global_scale" in str(error.value)
     assert ctx.reads == []

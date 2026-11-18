@@ -25,8 +25,9 @@ def test_fp8_scale_candidates_follow_priority(offset):
 @pytest.mark.parametrize("kind, name, candidates", [
     ("mxfp4", "x.weight", ["x.scale", "x.weight_scale"]),
     ("mxfp4", "x.weight_packed", ["x.weight_scale"]),
-    ("mxfp8", "x.weight", ["x.scale", "x.weight_scale"]),
+    ("mxfp8", "x.weight", ["x.scale", "x.weight_scale", "x.weight_scale_inv"]),
     ("nvfp4", "x.weight", ["x.weight_scale"]),
+    ("nvfp4", "x.weight_packed", ["x.weight_scale", "x.weight_packed_scale"]),
     ("int4", "x.weight_packed", ["x.weight_scale"]),
 ])
 def test_source_scale_naming_and_missing_candidates(kind, name, candidates):
@@ -36,6 +37,31 @@ def test_source_scale_naming_and_missing_candidates(kind, name, candidates):
         mapping = dict.fromkeys(candidates[index:], "other-shard.safetensors")
         assert find_scale_name(name, mapping, kind=kind) == expected
     assert find_scale_name(name, {"unrelated.scale": "a.safetensors"}, kind=kind) is None
+
+
+@pytest.mark.parametrize("sources, scale_keys", [
+    (("mxfp8",), ["x.scale", "x.weight_scale", "x.weight_scale_inv"]),
+    (("nvfp4",), ["x.weight_scale", "x.weight_scale_2", "x.weight_global_scale",
+                   "x.weight_packed_scale", "x.weight_packed_scale_2",
+                   "x.weight_packed_global_scale"]),
+    (("mxfp8", "nvfp4"), ["x.scale", "x.weight_scale_inv", "x.weight_scale",
+                             "x.weight_scale_2", "x.weight_global_scale"]),
+])
+def test_source_scale_aliases_are_filtered_before_routing(sources, scale_keys):
+    from qlean.modifiers_engine._runtime.region_router import (
+        derive_filter_source_key, validate_regions,
+    )
+
+    regions = [{"name": src, "match": f"{src}.*", "src": src, "dst": "W8A8"}
+               for src in sources]
+    regions.append({"name": "fallback", "match": "*"})
+    validate_regions(regions)
+    keep = derive_filter_source_key(regions)
+    assert keep is not None
+    for key in scale_keys:
+        assert not keep(key), key
+    for key in ("x.weight", "x.weight_packed", "x.bias", "x.norm.weight"):
+        assert keep(key), key
 
 
 def test_unspecified_kind_warns_on_ambiguity_and_uses_first(caplog):
@@ -57,7 +83,7 @@ def test_unknown_scale_kind_is_rejected():
         find_scale_name("x.weight", {}, kind="unknown")
 
 
-@pytest.mark.parametrize("src, packed_cols", [("int4", 16), ("mxfp4", 64)])
+@pytest.mark.parametrize("src, packed_cols", [("int4", 16), ("mxfp4", 64), ("nvfp4", 64)])
 @pytest.mark.parametrize("scheme", ["W8A8", "FP8_BLOCK", "FP8_DYNAMIC"])
 @pytest.mark.parametrize("scale_naming, expected_scale", [
     ("underscore", "x.weight_scale"), ("dot", "x.scale"),
