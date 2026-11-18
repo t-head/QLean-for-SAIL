@@ -230,9 +230,16 @@ def nvfp4(ctx, name: str, raw: torch.Tensor) -> torch.Tensor:
     scale_name = find_scale_name(name, ctx.weight_map, kind="nvfp4")
     if scale_name is None:
         raise ValueError(f"[dequant] {name} is nvfp4(uint8) but no local scale was found")
-    scale2_name = f"{scale_name}_2"
-    if scale2_name not in ctx.weight_map:
-        raise ValueError(f"[dequant] {name} found local scale '{scale_name}' but is missing global scale '{scale2_name}'")
+    base = scale_name[:-len("_scale")]
+    scale2_name = next(
+        (c for c in (f"{scale_name}_2", f"{base}_global_scale") if c in ctx.weight_map),
+        None,
+    )
+    if scale2_name is None:
+        raise ValueError(
+            f"[dequant] {name} found local scale '{scale_name}' but is missing global scale "
+            f"(tried '{scale_name}_2', '{base}_global_scale')"
+        )
     scale_local = ctx.get_tensor(scale_name)
     scale_global = ctx.get_tensor(scale2_name)
     group_size = ctx.transform_cfg.get("nvfp4_group_size", 16)

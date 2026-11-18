@@ -25,8 +25,10 @@ SCALE_RULES_BY_KIND = {
     "mxfp8": [
         (".weight", ".scale"),
         (".weight", ".weight_scale"),
+        ("", "_scale_inv"),
     ],
     "nvfp4": [
+        ("_packed", "_scale"),
         ("", "_scale"),
     ],
     "int4": [
