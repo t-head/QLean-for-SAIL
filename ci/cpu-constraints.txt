@@ -1,0 +1,11 @@
+torch==2.13.0
+triton==3.7.0
+numpy==1.26.0
+transformers==5.15.1
+huggingface-hub==1.33.0
+safetensors==0.8.0
+pydantic==2.14.1
+compressed-tensors==0.13.0
+PyYAML==6.0.3
+pytest==9.1.1
+setuptools==75.8.0

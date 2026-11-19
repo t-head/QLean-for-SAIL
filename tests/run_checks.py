@@ -6,18 +6,101 @@
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
+import ctypes
 import hashlib
 import importlib.metadata as metadata
 import json
 import os
 from pathlib import Path
 import resource
+import signal
 import subprocess
 import sys
 import time
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+
+
+def owned_process_groups(identity, session):
+    """Use session/group identity because the original parent may have exited."""
+    if not Path('/proc/self/stat').is_file():
+        raise RuntimeError('Process cleanup requires a mounted Linux /proc')
+    groups = set()
+    for path in Path('/proc').glob('[0-9]*/stat'):
+        try:
+            fields = path.read_text().rsplit(')', 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        pgid, sid = int(fields[2]), int(fields[3])
+        if (sid if session else pgid) == identity:
+            groups.add(pgid)
+    return groups
+
+
+def cleanup_processes(proc, *, session=True, grace=5):
+    """Escalate based on remaining descendants, not only the parent exit."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        deadline = time.monotonic() + grace
+        while True:
+            proc.poll()
+            groups = owned_process_groups(proc.pid, session)
+            for pgid in groups:
+                if pgid == os.getpgrp():
+                    raise RuntimeError('Refusing to signal the caller process group')
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    pass
+                while True:
+                    try:
+                        pid, _ = os.waitpid(-pgid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid == 0:
+                        break
+            if not owned_process_groups(proc.pid, session):
+                proc.wait(timeout=grace)
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    raise RuntimeError(f'Owned processes survived cleanup: {proc.pid}')
+
+
+@contextmanager
+def managed_process(command, *, session=True, grace=5, **kwargs):
+    """Keep conversion groups in the outer session so its cleanup owns them."""
+    if not sys.platform.startswith('linux'):
+        raise RuntimeError('Managed test processes require Linux')
+    if not Path('/proc/self/stat').is_file():
+        raise RuntimeError('Process cleanup requires a mounted Linux /proc')
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if (libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0)
+            or libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)):
+        raise OSError(ctypes.get_errno(), 'Cannot enable child subreaper')
+    old_handler = signal.getsignal(signal.SIGTERM)
+    def terminated(signum, frame):
+        raise SystemExit(128 + signum)
+    proc = None
+    try:
+        signal.signal(signal.SIGTERM, terminated)
+        options = {'start_new_session': True} if session else {'process_group': 0}
+        proc = subprocess.Popen(command, **options, **kwargs)
+        yield proc
+    finally:
+        try:
+            if proc is not None:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                cleanup_processes(proc, session=session, grace=grace)
+        finally:
+            signal.signal(signal.SIGTERM, old_handler)
+            if libc.prctl(PR_SET_CHILD_SUBREAPER, previous.value, 0, 0, 0):
+                raise OSError(ctypes.get_errno(), 'Cannot restore child subreaper')
 
 
 def save(path, data):
@@ -43,6 +126,11 @@ def source_manifest(root):
 def require_single_card(count):
     if count != 1:
         raise RuntimeError(f'PPU suite requires exactly one visible device; found {count}. Allocate the device explicitly.')
+
+
+def require_dual_card(count):
+    if count != 2:
+        raise RuntimeError(f'Dual-device PPU suite requires exactly two visible devices; found {count}.')
 
 
 def package_manifest(package):
@@ -108,6 +196,32 @@ def verify_record(data, root, package=None):
     return errors
 
 
+def check_constraints(text):
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    versions = {}
+    for line in text.splitlines():
+        line = line.split(' #', 1)[0].strip()
+        if not line or line.startswith('#'):
+            continue
+        requirement = Requirement(line)
+        if requirement.url or requirement.extras or not requirement.specifier:
+            raise ValueError('Constraints must contain versioned package requirements: ' + line)
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        actual = metadata.version(requirement.name)
+        version = Version(actual)
+        for specifier in requirement.specifier:
+            matches = specifier.contains(version, prereleases=True)
+            if not matches:
+                raise RuntimeError(f'Dependency mismatch: {requirement.name}={actual}; required {requirement.specifier}')
+        versions[requirement.name] = actual
+    if not versions:
+        raise ValueError('Constraints contain no applicable package requirements')
+    return versions
+
+
 def worker(args):
     import faulthandler
     import pytest
@@ -141,7 +255,12 @@ def worker(args):
                 layers = sum(item.get_closest_marker(m) is not None for m in ('unit', 'integration', 'e2e'))
                 if cpu == gpu or layers != 1:
                     data['audit_errors'].append('Missing or conflicting test markers: ' + item.nodeid)
-                choose = (args.suite == 'cpu' and cpu or args.suite == 'ppu' and gpu)
+                multi = item.get_closest_marker('multi_gpu') is not None
+                if multi and not gpu:
+                    data['audit_errors'].append('multi_gpu requires the gpu marker: ' + item.nodeid)
+                choose = (args.suite == 'cpu' and cpu
+                          or args.suite == 'ppu' and gpu and not multi
+                          or args.suite == 'ppu-dual' and gpu and multi)
                 (chosen if choose else excluded).append(item)
             data['expected_selected'] = [i.nodeid for i in chosen]
             data['expected_deselected'] = [i.nodeid for i in excluded]
@@ -163,25 +282,20 @@ def worker(args):
                                         duration=report.duration, wasxfail=getattr(report, 'wasxfail', None),
                                         detail=str(report.longrepr) if report.outcome != 'passed' else ''))
 
-    options = [str(ROOT / 'tests'), '-c', str(ROOT / 'pytest.ini'), '-p', 'no:cacheprovider', '-ra', '--tb=short',
-               '--basetemp=' + str(args.output / 'tmp'), '--junitxml=' + str(args.output / 'junit.xml')]
-    if args.suite == 'ppu':
+    options = [str(ROOT / 'tests')]
+    options += ['-c', str(ROOT / 'pytest.ini'), '-p', 'no:cacheprovider', '-ra', '--tb=short',
+                '--basetemp=' + str(args.output / 'tmp'), '--junitxml=' + str(args.output / 'junit.xml')]
+    if args.constraints:
+        data['constraints_path'] = str(args.constraints)
+        data['constraints_text'] = args.constraints.read_text()
+        data['dependency_versions'] = check_constraints(data['constraints_text'])
+    if args.suite in ('ppu', 'ppu-dual'):
         if sys.version_info[:2] != (3, 12):
             raise RuntimeError('PPU suite requires the validated Python 3.12 environment')
-        constraints = ROOT / 'ci/ppu-constraints.txt'
-        data['dependency_versions'] = {}
-        for line in constraints.read_text().splitlines():
-            if not line.strip() or line.lstrip().startswith('#'):
-                continue
-            name, required = line.strip().split('==')
-            actual = metadata.version(name)
-            data['dependency_versions'][name] = actual
-            if actual != required:
-                raise RuntimeError(f'PPU dependency mismatch: {name}={actual}; required {required}')
         import torch
         count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        require_single_card(count)
-        data['hardware'] = [str(torch.cuda.get_device_properties(0))]
+        (require_dual_card if args.suite == 'ppu-dual' else require_single_card)(count)
+        data['hardware'] = [str(torch.cuda.get_device_properties(i)) for i in range(count)]
         options.append('--require-gpu')
     data['pytest_exitcode'] = int(pytest.main(options, plugins=[Audit()]))
     data['audit_errors'].extend(execution_errors(data))
@@ -207,12 +321,13 @@ def worker(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run audited CPU or single-device PPU tests, or verify an existing report.')
+    parser = argparse.ArgumentParser(description='Run audited full CPU, single-device PPU, or minimal dual-device PPU tests.')
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--suite', choices=['cpu', 'ppu'])
+    mode.add_argument('--suite', choices=['cpu', 'ppu', 'ppu-dual'])
     mode.add_argument('--verify-report', type=Path)
     parser.add_argument('--source-root', type=Path, default=ROOT)
     parser.add_argument('--package-root', type=Path)
+    parser.add_argument('--constraints', type=Path, help='Environment constraints; required for the PPU suites')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--installed', action='store_true')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
@@ -221,6 +336,14 @@ def main():
         errors = verify_record(json.loads(args.verify_report.read_text()), args.source_root, args.package_root)
         print(json.dumps({'success': not errors, 'errors': errors}, ensure_ascii=False, indent=2))
         return 1 if errors else 0
+    if not sys.platform.startswith('linux') or sys.version_info < (3, 11):
+        parser.error('Test runner requires Linux and Python >=3.11 (subprocess process_group)')
+    if args.suite in ('ppu', 'ppu-dual') and args.constraints is None:
+        parser.error('PPU suites require --constraints')
+    if args.constraints:
+        args.constraints = args.constraints.resolve()
+        if not args.constraints.is_file():
+            parser.error('--constraints must reference an existing file')
     if args.output is None:
         parser.error('--suite requires --output')
     args.output = args.output.resolve()
@@ -230,17 +353,23 @@ def main():
     if args.worker:
         return worker(args)
     args.output.mkdir(parents=True, exist_ok=False)
+    if args.constraints:
+        contents = args.constraints.read_bytes()
+        args.constraints = args.output / 'constraints.txt'
+        args.constraints.write_bytes(contents)
     env = {k: v for k, v in os.environ.items() if not k.startswith('PYTHON') and k != 'PYTEST_ADDOPTS'}
     env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
                OMP_NUM_THREADS='1', TRITON_CACHE_DIR=str(args.output / 'triton_cache'),
                HF_HOME=str(args.output / 'hf_cache'), TORCH_HOME=str(args.output / 'torch_cache'))
     command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--worker', '--suite', args.suite,
                '--output', str(args.output)] + (['--installed'] if args.installed else [])
+    if args.constraints:
+        command += ['--constraints', str(args.constraints)]
     start = time.monotonic()
     with (args.output / 'pytest.log').open('w') as log:
         try:
-            proc = subprocess.run(command, cwd=args.output, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=900)
-            code = proc.returncode
+            with managed_process(command, cwd=args.output, env=env, stdout=log, stderr=subprocess.STDOUT) as proc:
+                code = proc.wait(timeout=900)
         except subprocess.TimeoutExpired:
             code = 124
     save(args.output / 'execution.json', dict(command=command, returncode=code, cwd=str(args.output),
