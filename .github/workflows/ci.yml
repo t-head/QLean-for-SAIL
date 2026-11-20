@@ -24,17 +24,15 @@ jobs:
     uses: t-head/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
-  # TODO(debug): human review gate temporarily disabled to iterate on CI failures.
-  # Restore this job and the `needs: human-review` lines below before merging.
-  # human-review:
-  #   name: Human Review Gate
-  #   needs: ai-code-review
-  #   uses: t-head/.github/.github/workflows/human-review.yml@main
-  #   secrets: inherit
+  human-review:
+    name: Human Review Gate
+    needs: ai-code-review
+    uses: t-head/.github/.github/workflows/human-review.yml@main
+    secrets: inherit
 
   cpu-test:
     name: CPU Test
-    needs: ai-code-review # TODO(debug): restore to human-review
+    needs: human-review
     runs-on: k8s-runner-group-cpu-thead
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -115,7 +113,7 @@ jobs:
 
   ppu-ci:
     name: ppu-ci
-    needs: ai-code-review # TODO(debug): restore to human-review
+    needs: human-review
     runs-on: k8s-runner-group-cpu-thead
     container:
       image: ghcr.io/actions/actions-runner:latest
