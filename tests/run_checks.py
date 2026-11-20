@@ -32,7 +32,7 @@ def owned_process_groups(identity, session):
     groups = set()
     for path in Path('/proc').glob('[0-9]*/stat'):
         try:
-            fields = path.read_text().rsplit(')', 1)[1].split()
+            fields = path.read_text(errors='replace').rsplit(')', 1)[1].split()
         except (FileNotFoundError, ProcessLookupError):
             continue
         pgid, sid = int(fields[2]), int(fields[3])
