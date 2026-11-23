@@ -65,7 +65,7 @@ def find_scale_name(weight_name: str, weight_map: dict) -> str | None:
 
 def ensure_scales_in_weight_map(weight_map: dict, model_path: str) -> None:
     """If weight_map has no scale entries, scan the safetensors files under model_path to fill them in."""
-    SCALE_SUFFIXES = ("input_scale", "weight_scale", "weight_scale_2", "scale_inv")
+    SCALE_SUFFIXES = ("input_scale", "weight_scale", "weight_scale_2", "scale_inv", "_global_scale")
     has_scale = any(name.endswith(SCALE_SUFFIXES) for name in weight_map)
     if has_scale:
         return

@@ -258,7 +258,7 @@ def _find_quant_method(obj: dict, depth: int = 0) -> str:
 def _detect_from_keys(keys) -> str | None:
     has_scale_inv = False
     has_weight_scale = False
-    has_weight_scale_2 = False
+    has_weight_global_scale = False
     has_input_scale = False
 
     for key in keys:
@@ -266,13 +266,13 @@ def _detect_from_keys(keys) -> str | None:
             has_scale_inv = True
         elif key.endswith(".weight_scale"):
             has_weight_scale = True
-        elif key.endswith(".weight_scale_2"):
-            has_weight_scale_2 = True
+        elif key.endswith((".weight_scale_2", ".weight_global_scale")):
+            has_weight_global_scale = True
         elif key.endswith(".input_scale"):
             has_input_scale = True
 
-    # NVFP4: weight_scale + weight_scale_2 + input_scale must all be present
-    if has_weight_scale and has_weight_scale_2 and has_input_scale:
+    # NVFP4: local scale, global scale, and input scale must all be present.
+    if has_weight_scale and has_weight_global_scale and has_input_scale:
         return "NVFP4"
     # FP8: any key carrying the .scale_inv suffix
     if has_scale_inv:
