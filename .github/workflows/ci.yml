@@ -101,11 +101,14 @@ jobs:
             test -d "$QLEAN_REPORT_ROOT"
             test -w "$QLEAN_REPORT_ROOT"
             out="$QLEAN_REPORT_ROOT/qlean-cpu-$QLEAN_RUN_KEY"
-            scratch="$(mktemp -d /tmp/qlean-cpu-XXXXXX)"
+            scratch_base="$(mktemp -d /tmp/qlean-cpu-XXXXXX)"
+            scratch="$scratch_base/run"
             cleanup() {
               mkdir -p "$out"
-              (cd "$scratch" && tar cf - --exclude=./venv --exclude=./wheel --exclude=./cache --exclude=./tmp --exclude='*triton_cache' --exclude='*hf_cache' --exclude='*torch_cache' .) | (cd "$out" && tar xf -)
-              rm -rf "$scratch"
+              if [ -d "$scratch" ]; then
+                (cd "$scratch" && tar cf - --exclude=./venv --exclude=./wheel --exclude=./cache --exclude=./tmp --exclude='*triton_cache' --exclude='*hf_cache' --exclude='*torch_cache' .) | (cd "$out" && tar xf -)
+              fi
+              rm -rf "$scratch_base"
               chmod -R a+rX "$out" 2>/dev/null || true
             }
             trap cleanup EXIT
