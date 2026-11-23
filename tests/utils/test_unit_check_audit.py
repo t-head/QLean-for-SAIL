@@ -3,10 +3,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
 from copy import deepcopy
+import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
+import sys
+from textwrap import dedent
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,8 +32,136 @@ def complete_record():
                          for node in nodes for phase in ('setup', 'call', 'teardown')])
 
 
+@pytest.mark.skipif(not sys.platform.startswith('linux') or sys.version_info < (3, 11),
+                    reason='Process cleanup requires Linux and Python >=3.11')
+@pytest.mark.parametrize('session,failure', [
+    pytest.param(False, 'parent-exited', id='parent-exited-conversion-group'),
+    pytest.param(True, 'parent-exited', id='parent-exited-runner-session'),
+    pytest.param(False, 'timeout', id='timeout-conversion-group'),
+    pytest.param(True, 'timeout', id='timeout-runner-session'),
+    pytest.param(False, 'exception', id='exception-conversion-group'),
+    pytest.param(True, 'exception', id='exception-runner-session'),
+    pytest.param(False, 'success', id='success-conversion-group'),
+])
+def test_cleanup_reaps_descendants_without_touching_other_groups(tmp_path, session, failure):
+    ready = tmp_path / 'ready.json'
+    helper = tmp_path / 'cleanup_process.py'
+    helper.write_text(dedent('''\
+        import json
+        import os
+        from pathlib import Path
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        role, ready_path, mode, new_group = sys.argv[1:]
+        ready = Path(ready_path)
+        if role == 'child':
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            temporary = ready.with_suffix('.tmp')
+            temporary.write_text(json.dumps(dict(pid=os.getpid(), pgid=os.getpgrp(), sid=os.getsid(0))))
+            temporary.replace(ready)
+            time.sleep(120)
+        else:
+            options = {'process_group': 0} if new_group == '1' else {}
+            subprocess.Popen([sys.executable, '-I', '-B', __file__, 'child', ready_path, mode, new_group],
+                             **options)
+            deadline = time.monotonic() + 30
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Child did not become ready')
+                time.sleep(0.05)
+            if mode not in ('parent-exited', 'success'):
+                time.sleep(120)
+        '''))
+    command = [sys.executable, '-I', '-B', str(helper), 'parent', str(ready), failure, str(int(session))]
+    sentinel = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(120)'],
+                                start_new_session=True)
+    expected = (nullcontext() if failure == 'success' else
+                pytest.raises(subprocess.TimeoutExpired) if failure == 'timeout' else
+                pytest.raises(RuntimeError, match='cleanup-regression'))
+    try:
+        with expected:
+            # Allow loaded runners time to schedule and reap these real CPU processes.
+            with AUDIT['managed_process'](command, session=session, grace=2) as proc:
+                deadline = time.monotonic() + 30
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert ready.exists(), 'Descendant did not start'
+                descendant = json.loads(ready.read_text())
+                assert descendant['sid'] == (proc.pid if session else os.getsid(0))
+                assert descendant['pgid'] == (descendant['pid'] if session else proc.pid)
+                if failure == 'parent-exited':
+                    assert proc.wait(timeout=30) == 0
+                    os.kill(descendant['pid'], 0)
+                    raise RuntimeError('cleanup-regression: parent already exited')
+                elif failure == 'timeout':
+                    proc.wait(timeout=0.1)
+                elif failure == 'exception':
+                    raise RuntimeError('cleanup-regression: parent still running')
+                elif failure == 'success':
+                    assert proc.wait(timeout=30) == 0
+                    os.kill(descendant['pid'], 0)
+        assert not Path(f"/proc/{descendant['pid']}").exists(), 'Descendant was not reaped'
+        assert not AUDIT['owned_process_groups'](proc.pid, session)
+        assert sentinel.poll() is None, 'Unrelated process was terminated'
+    finally:
+        sentinel.terminate()
+        sentinel.wait(timeout=30)
+
+
 def test_complete_execution_is_accepted(complete_record):
     assert AUDIT['execution_errors'](complete_record) == []
+
+
+@pytest.mark.parametrize('matches', [True, False], ids=['fixed-environment', 'dependency-mismatch'])
+def test_cpu_suite_validates_dependencies_and_selects_targets(tmp_path, monkeypatch, matches):
+    root = AUDIT['ROOT']
+    for name in list(sys.modules):
+        if name == 'qlean' or name.startswith('qlean.'):
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(root / 'src'))
+    monkeypatch.setattr(AUDIT['metadata'], 'version', lambda name: '1.0')
+    constraints = tmp_path / 'constraints.txt'
+    constraints.write_text('pytest==1.0\n' if matches else 'pytest==2.0\n')
+    calls = []
+
+    def run_tests(options, plugins):
+        calls.append(options)
+        assert options[:options.index('-c')] == [str(root / 'tests')]
+        audit, = plugins
+        items = [SimpleNamespace(nodeid=device, get_closest_marker=lambda name, device=device:
+                                 True if name in ('unit', device) else None)
+                 for device in ('cpu', 'gpu')]
+        config = SimpleNamespace(hook=SimpleNamespace(pytest_deselected=audit.pytest_deselected))
+        session = SimpleNamespace(items=items)
+        audit.pytest_collection_modifyitems(session, config, items)
+        audit.pytest_collection_finish(session)
+        assert [item.nodeid for item in items] == ['cpu']
+        for phase in ('setup', 'call', 'teardown'):
+            audit.pytest_runtest_logreport(SimpleNamespace(
+                nodeid='cpu', when=phase, outcome='passed', duration=0))
+        return 0
+
+    monkeypatch.setattr(pytest, 'main', run_tests)
+    args = SimpleNamespace(suite='cpu', installed=False, output=tmp_path, constraints=constraints)
+    if not matches:
+        with pytest.raises(RuntimeError, match='Dependency mismatch'):
+            AUDIT['worker'](args)
+        assert not calls
+        return
+
+    assert AUDIT['worker'](args) == 0
+    assert len(calls) == 1
+    result = json.loads((tmp_path / 'result.json').read_text())
+    assert result['success']
+    assert result['suite'] == 'cpu'
+    assert not result['installed']
+    assert Path(result['origin']).resolve().is_relative_to(root / 'src')
+    assert result['dependency_versions'] == {'pytest': '1.0'}
+    assert result['selected'] == ['cpu']
+    assert result['deselected'] == ['gpu']
 
 
 @pytest.mark.parametrize('count', [0, 1, 2])
@@ -36,6 +171,15 @@ def test_ppu_entry_requires_exactly_one_visible_card(count):
     else:
         with pytest.raises(RuntimeError, match='exactly one visible device'):
             AUDIT['require_single_card'](count)
+
+
+@pytest.mark.parametrize('count', [0, 1, 2])
+def test_dual_ppu_entry_requires_exactly_two_visible_cards(count):
+    if count == 2:
+        AUDIT['require_dual_card'](count)
+    else:
+        with pytest.raises(RuntimeError, match='exactly two visible devices'):
+            AUDIT['require_dual_card'](count)
 
 
 @pytest.mark.parametrize('damage', ['missing_call', 'missing_teardown', 'duplicate', 'skip', 'xfail',
