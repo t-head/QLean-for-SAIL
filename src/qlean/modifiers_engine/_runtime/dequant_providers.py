@@ -227,21 +227,30 @@ def nvfp4(ctx, name: str, raw: torch.Tensor) -> torch.Tensor:
                 f"{raw.dtype}; expected uint8 packed weights"
             )
         return raw
-    scale_name = find_scale_name(name, ctx.weight_map, kind="nvfp4")
-    if scale_name is None:
-        raise ValueError(f"[dequant] {name} is nvfp4(uint8) but no local scale was found")
-    base = scale_name[:-len("_scale")]
-    scale2_name = next(
-        (c for c in (f"{scale_name}_2", f"{base}_global_scale") if c in ctx.weight_map),
-        None,
-    )
-    if scale2_name is None:
+    tried_globals = []
+    for strip, add in _SCALE_RULES_BY_KIND["nvfp4"]:
+        if strip and not name.endswith(strip):
+            continue
+        scale_name = (name[:-len(strip)] if strip else name) + add
+        if scale_name not in ctx.weight_map:
+            continue
+        base = scale_name[:-len("_scale")]
+        candidates = (f"{scale_name}_2", f"{base}_global_scale")
+        scale2_name = next((c for c in candidates if c in ctx.weight_map), None)
+        if scale2_name is not None:
+            break
+        tried_globals.extend(candidates)
+    else:
+        if not tried_globals:
+            raise ValueError(f"[dequant] {name} is nvfp4(uint8) but no local scale was found")
         raise ValueError(
-            f"[dequant] {name} found local scale '{scale_name}' but is missing global scale "
-            f"(tried '{scale_name}_2', '{base}_global_scale')"
+            f"[dequant] {name} found local scales but is missing global scale "
+            f"(tried {', '.join(repr(c) for c in tried_globals)})"
         )
     scale_local = ctx.get_tensor(scale_name)
     scale_global = ctx.get_tensor(scale2_name)
+    if scale2_name == f"{base}_global_scale":
+        scale_global = scale_global.float().reciprocal()
     group_size = ctx.transform_cfg.get("nvfp4_group_size", 16)
     validate_scale_shape(scale_local, tuple(raw.shape), kind="nvfp4", group_size=group_size)
     return dequantize_nvfp4(raw, scale_local, scale_global, group_size=group_size,

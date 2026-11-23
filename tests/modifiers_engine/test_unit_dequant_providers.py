@@ -52,29 +52,39 @@ def test_fp8_provider_blocks_tail_and_experts(block_size, batched, target):
     torch.testing.assert_close(scale, scale_before, rtol=0, atol=0)
 
 
-@pytest.mark.cpu
+@pytest.mark.parametrize("device, global_dtype, global_value", [
+    pytest.param("cpu", "float32", 0.5, marks=pytest.mark.cpu),
+    pytest.param("cpu", "float16", 3.0, marks=pytest.mark.cpu),
+    pytest.param("cuda", "bfloat16", 3.0, marks=pytest.mark.gpu),
+])
 @pytest.mark.parametrize("group_size", [16, 32])
 @pytest.mark.parametrize("target", ["fp32", "bf16"])
 @pytest.mark.parametrize("name", ["x.weight", "x.weight_packed"])
 @pytest.mark.parametrize("global_name", ["x.weight_scale_2", "x.weight_global_scale"])
-def test_nvfp4_local_global_scale_and_tail(group_size, target, name, global_name):
+def test_nvfp4_local_global_scale_and_tail(
+    group_size, target, name, global_name, device, global_dtype, global_value,
+):
     import torch
     from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
 
     payload = [i | ((i + 1) << 4) for i in range(0, 16, 2)] * 2 + [0xF1]
     values = list(_FP4) * 2 + [0.5, -6]
-    raw = torch.tensor([payload, payload], dtype=torch.uint8)
+    raw = torch.tensor([payload, payload], dtype=torch.uint8, device=device)
     groups = (34 + group_size - 1) // group_size
-    local = torch.tensor([[0.5, 1, 2][:groups], [2, 4, 8][:groups]], dtype=torch.float32)
-    global_scale = torch.tensor(0.5, dtype=torch.float32)
+    local = torch.tensor([[0.5, 1, 2][:groups], [2, 4, 8][:groups]],
+                         dtype=torch.float32, device=device)
+    global_scale = torch.tensor(global_value, dtype=getattr(torch, global_dtype), device=device)
     ctx = _context({"x.weight_scale": local, global_name: global_scale},
                    dequant_dtype=target, nvfp4_group_size=group_size)
-    expected = [[v * float(local[r, c // group_size]) * 0.5 for c, v in enumerate(values)]
+    multiplier = global_value if global_name.endswith("_scale_2") else 1.0 / global_value
+    expected = [[v * float(local[r, c // group_size]) * multiplier for c, v in enumerate(values)]
                 for r in range(2)]
     before, local_before, global_before = raw.clone(), local.clone(), global_scale.clone()
     actual = nvfp4(ctx, name, raw)
     dtype = torch.float32 if target == "fp32" else torch.bfloat16
-    torch.testing.assert_close(actual, torch.tensor(expected, dtype=dtype), rtol=0, atol=0)
+    rtol = 2e-7 if target == "fp32" and global_value == 3.0 else 0
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=dtype, device=device),
+                               rtol=rtol, atol=0)
     assert ctx.reads == ["x.weight_scale", global_name]
     torch.testing.assert_close(raw, before, rtol=0, atol=0)
     torch.testing.assert_close(local, local_before, rtol=0, atol=0)
@@ -96,6 +106,44 @@ def test_nvfp4_global_scale_legacy_name_takes_priority(name):
     expected = torch.tensor([[0.0625, -0.75] * 8], dtype=torch.float32)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert ctx.reads == ["x.weight_scale", "x.weight_scale_2"]
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("preferred", ["absent", "incomplete", "complete"])
+@pytest.mark.parametrize("global_suffixes", [("_scale_2",), ("_global_scale",),
+                                             ("_scale_2", "_global_scale")])
+def test_nvfp4_selects_first_complete_scale_pair(preferred, global_suffixes):
+    import torch
+    from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
+
+    tensors = {"x.weight_packed_scale": torch.full((1, 1), 2.0)}
+    for suffix in global_suffixes:
+        tensors[f"x.weight_packed{suffix}"] = torch.tensor(4.0)
+    if preferred != "absent":
+        tensors["x.weight_scale"] = torch.full((1, 1), 0.5)
+    if preferred == "complete":
+        tensors["x.weight_global_scale"] = torch.tensor(2.0)
+    ctx = _context(tensors, dequant_dtype="fp32", nvfp4_group_size=16)
+    before = {key: value.clone() for key, value in tensors.items()}
+    weight_map_before = dict(ctx.weight_map)
+    raw = torch.full((1, 8), 0xF1, dtype=torch.uint8)
+    raw_before = raw.clone()
+
+    actual = nvfp4(ctx, "x.weight_packed", raw)
+
+    if preferred == "complete":
+        factor = 0.25
+        expected_reads = ["x.weight_scale", "x.weight_global_scale"]
+    else:
+        factor = 8.0 if "_scale_2" in global_suffixes else 0.5
+        expected_reads = ["x.weight_packed_scale", f"x.weight_packed{global_suffixes[0]}"]
+    expected = torch.tensor([[0.5 * factor, -6 * factor] * 8])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert ctx.reads == expected_reads
+    assert ctx.weight_map == weight_map_before
+    torch.testing.assert_close(raw, raw_before, rtol=0, atol=0)
+    for key, value in tensors.items():
+        torch.testing.assert_close(value, before[key], rtol=0, atol=0)
 
 
 @pytest.mark.gpu
@@ -205,13 +253,21 @@ def test_mxfp_rejects_numeric_scale_bytes(kind):
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("name", ["x.weight", "x.weight_packed"])
-def test_nvfp4_missing_global_scale_fails_before_read(name):
+@pytest.mark.parametrize("keys, message", [
+    ([], "no local scale"),
+    (["x.weight_packed_scale_2"], "no local scale"),
+    (["x.weight_scale"], "missing global scale"),
+    (["x.weight_scale", "x.weight_packed_scale"], "missing global scale"),
+    (["x.weight_scale", "x.weight_packed_scale_2"], "missing global scale"),
+])
+def test_nvfp4_missing_scale_pair_fails_before_read(name, keys, message):
     import torch
     from qlean.modifiers_engine._runtime.dequant_providers import nvfp4
 
-    ctx = _context({"x.weight_scale": torch.ones((2, 1), dtype=torch.float32)})
-    with pytest.raises(ValueError, match="missing global scale") as error:
-        nvfp4(ctx, name, torch.zeros((2, 8), dtype=torch.uint8))
-    assert "x.weight_scale_2" in str(error.value)
-    assert "x.weight_global_scale" in str(error.value)
+    ctx = _context({key: torch.ones((1, 1)) for key in keys})
+    with pytest.raises(ValueError, match=message) as error:
+        nvfp4(ctx, name, torch.zeros((1, 8), dtype=torch.uint8))
+    if message == "missing global scale":
+        assert "x.weight_scale_2" in str(error.value)
+        assert "x.weight_global_scale" in str(error.value)
     assert ctx.reads == []
