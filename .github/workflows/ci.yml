@@ -3,6 +3,9 @@ name: CI Pipeline
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Late reviews retrigger the gates; this event runs the base-branch workflow, so it takes effect after merge.
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: read
@@ -10,17 +13,29 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Pushes supersede stale runs; review-triggered runs queue instead of cancelling active tests.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   precheck:
     name: Pre-check
+    # Only verdict-changing reviews (human approval/request-changes or an AI bot review) retrigger the pipeline;
+    # skipping the entry job skips every downstream job via needs.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      github.event.review.state == 'approved' ||
+      github.event.review.state == 'changes_requested' ||
+      contains(fromJSON('["copilot-pull-request-reviewer[bot]", "copilot", "gemini-code-assist[bot]"]'), github.event.review.user.login)
     uses: t-head/.github/.github/workflows/user-precheck.yml@main
     secrets: inherit
 
   ai-code-review:
     name: AI Code Review (Copilot Gate)
     needs: precheck
+    # The reusable gate needs write access to request Copilot itself; cluster test jobs stay read-only.
+    permissions:
+      contents: read
+      pull-requests: write
     uses: t-head/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
@@ -86,8 +101,15 @@ jobs:
             test -d "$QLEAN_REPORT_ROOT"
             test -w "$QLEAN_REPORT_ROOT"
             out="$QLEAN_REPORT_ROOT/qlean-cpu-$QLEAN_RUN_KEY"
-            trap 'chmod -R a+rX "$out" 2>/dev/null || true' EXIT
-            "$QLEAN_CPU_PYTHON" -I -B /workspace/source/tests/check_install.py --constraints /workspace/source/ci/cpu-constraints.txt --output "$out"
+            scratch="$(mktemp -d /tmp/qlean-cpu-XXXXXX)"
+            cleanup() {
+              mkdir -p "$out"
+              (cd "$scratch" && tar cf - --exclude=./venv --exclude=./wheel --exclude=./cache --exclude=./tmp --exclude='*triton_cache' --exclude='*hf_cache' --exclude='*torch_cache' .) | (cd "$out" && tar xf -)
+              rm -rf "$scratch"
+              chmod -R a+rX "$out" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            "$QLEAN_CPU_PYTHON" -I -B /workspace/source/tests/check_install.py --constraints /workspace/source/ci/cpu-constraints.txt --output "$scratch"
       - name: Require successful terminal state
         if: always()
         shell: bash
@@ -167,8 +189,8 @@ jobs:
             test -d "$QLEAN_REPORT_ROOT"
             test -w "$QLEAN_REPORT_ROOT"
             out="$QLEAN_REPORT_ROOT/qlean-ppu-$QLEAN_RUN_KEY"
-            trap 'chmod -R a+rX "$out" 2>/dev/null || true' EXIT
-            "$QLEAN_PPU_PYTHON" -B -m pip install --no-cache-dir --disable-pip-version-check -i https://download.t-head.cn/artifactory/api/pypi/pypi_index/simple transformers==5.15.1 huggingface-hub==1.33.0 safetensors==0.8.0 pydantic==2.14.1 compressed-tensors==0.13.0 PyYAML==6.0.3 pytest==9.1.1
+            trap 'rm -rf "$out/triton_cache" "$out/hf_cache" "$out/torch_cache" 2>/dev/null; chmod -R a+rX "$out" 2>/dev/null || true' EXIT
+            "$QLEAN_PPU_PYTHON" -B -m pip install --no-cache-dir --disable-pip-version-check -i https://download.t-head.cn/artifactory/api/pypi/pypi_index/simple -c /workspace/source/ci/ppu-constraints.txt transformers huggingface-hub safetensors pydantic compressed-tensors PyYAML pytest
             "$QLEAN_PPU_PYTHON" -I -B /workspace/source/tests/run_checks.py --suite ppu --constraints /workspace/source/ci/ppu-constraints.txt --output "$out"
       - name: Run minimal dual-device 810E regression
         id: ppu_dual
@@ -191,8 +213,8 @@ jobs:
             test -d "$QLEAN_REPORT_ROOT"
             test -w "$QLEAN_REPORT_ROOT"
             out="$QLEAN_REPORT_ROOT/qlean-ppu-dual-$QLEAN_RUN_KEY"
-            trap 'chmod -R a+rX "$out" 2>/dev/null || true' EXIT
-            "$QLEAN_PPU_PYTHON" -B -m pip install --no-cache-dir --disable-pip-version-check -i https://download.t-head.cn/artifactory/api/pypi/pypi_index/simple transformers==5.15.1 huggingface-hub==1.33.0 safetensors==0.8.0 pydantic==2.14.1 compressed-tensors==0.13.0 PyYAML==6.0.3 pytest==9.1.1
+            trap 'rm -rf "$out/triton_cache" "$out/hf_cache" "$out/torch_cache" 2>/dev/null; chmod -R a+rX "$out" 2>/dev/null || true' EXIT
+            "$QLEAN_PPU_PYTHON" -B -m pip install --no-cache-dir --disable-pip-version-check -i https://download.t-head.cn/artifactory/api/pypi/pypi_index/simple -c /workspace/source/ci/ppu-constraints.txt transformers huggingface-hub safetensors pydantic compressed-tensors PyYAML pytest
             "$QLEAN_PPU_PYTHON" -I -B /workspace/source/tests/run_checks.py --suite ppu-dual --constraints /workspace/source/ci/ppu-constraints.txt --output "$out"
       - name: Require successful terminal states
         if: always()
