@@ -33,6 +33,22 @@ git clone https://github.com/t-head/QLean-for-SAIL.git && cd QLean-for-SAIL
 pip install .
 ```
 
+The core install covers the data-free conversions and keeps the wide
+`torch` / `transformers` ranges above.
+
+Calibration-based GPTQ (`--output-format GPTQ_*`) is an optional extra with
+narrower floors, because it needs the compressed-tensors offload/distributed
+subpackages and the transformers v5 weight-conversion APIs:
+
+```bash
+pip install ".[gptq]"   # compressed-tensors>=0.18 (torch>=2.10), transformers>=5.15
+```
+
+Without the extra, `qlean` still imports and the data-free conversions still run;
+reaching a GPTQ route raises an `ImportError` that names the extra. The PPU
+`torch 2.9` build predates `torch>=2.10`, so GPTQ currently requires a non-PPU
+environment or a newer PPU torch build.
+
 ## Quick Start
 
 ```bash

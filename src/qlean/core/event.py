@@ -19,6 +19,7 @@ class EventType(Enum):
 
     # calibration
     CALIBRATION_EPOCH_START = "calibration_epoch_start"
+    SEQUENTIAL_EPOCH_START = "sequential_epoch_start"
     SEQUENTIAL_EPOCH_END = "sequential_epoch_end"
     CALIBRATION_EPOCH_END = "calibration_epoch_end"
 

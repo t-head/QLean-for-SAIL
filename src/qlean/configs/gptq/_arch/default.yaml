@@ -1,0 +1,30 @@
+# Default GPTQ quantization recipe.
+# ignore mirrors the data-free default's protected regions (configs/day0/_arch/default.yaml),
+# translated from engine globs to compressed-tensors `re:` patterns, plus the MoE/MTP
+# protections the GPTQ reference scripts use. Model-specific recipes override this file.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      block_size: 32
+      dampening_frac: 0.001
+      offload_hessians: false
+      actorder: static
+      scheme: MXFP4
+      targets:
+        - "Linear"
+      ignore:
+        - 're:.*lm_head.*'
+        - 're:.*embed_tokens.*'
+        - 're:.*word_embeddings.*'
+        - 're:.*tok_embeddings.*'
+        - 're:.*embed_in.*'
+        - 're:.*embed_out.*'
+        - 're:.*embed_positions.*'
+        - 're:.*position_embeddings.*'
+        - 're:.*token_type_embeddings.*'
+        - 're:.*norm.*'
+        - 're:(?:.*\.)?gate$'
+        - 're:(?:.*\.)?router$'
+        - 're:.*shared_expert_gate$'
+        - 're:.*mtp.*'
+        - 're:.*visual.*'

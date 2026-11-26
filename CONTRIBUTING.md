@@ -48,6 +48,14 @@ Use the [issue templates](.github/ISSUE_TEMPLATE) to report bugs or propose feat
    python tests/run_checks.py --suite cpu --output /tmp/qlean-cpu
    ```
 
+   GPTQ tests carry the `gptq` marker and are excluded from the `cpu` and `ppu` suites, because they need the optional extra's narrower dependencies. Run them in a separate environment prepared with `pip install -e ".[gptq,dev]" -c ci/gptq-constraints.txt`:
+
+   ```bash
+   python tests/run_checks.py --suite gptq --output /tmp/qlean-gptq
+   ```
+
+   The `gptq` suite asserts the installed versions against `ci/gptq-constraints.txt`. Tests marked `optional` skip by design when native or accelerator dependencies are absent; they are excluded from every audited suite and can be run directly with `python -m pytest tests -m optional`.
+
    If you cannot run hardware-dependent checks, state what remains untested in the pull request and ask a maintainer for help.
 
 5. Keep the branch in sync with `main` while you work:

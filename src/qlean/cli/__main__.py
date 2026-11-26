@@ -6,6 +6,7 @@
 import argparse
 import logging
 import re
+import sys
 
 def setup_logging(level):
     fmt = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
@@ -36,6 +37,11 @@ _OUTPUT_FORMAT_DEFS = {
     "FP8_BLOCK":   ["FP8-BLOCK", "FP8_BLOCK"],
     "FP8_DYNAMIC": ["FP8-DYNAMIC", "FP8_DYNAMIC", "FP8-CHANNEL", "FP8_CHANNEL"],
     "MXFP4":       ["MXFP4"],
+    "GPTQ_INT4":   ["GPTQ_INT4"],
+    "GPTQ_INT8":   ["GPTQ_INT8"],
+    "GPTQ_MXFP4":  ["GPTQ_MXFP4"],
+    "GPTQ_INT4_GROUP": ["GPTQ_INT4_GROUP"],
+    "GPTQ_INT8_GROUP": ["GPTQ_INT8_GROUP"],
     "BF16":        ["BF16"],
 }
 
@@ -48,6 +54,13 @@ for canonical, aliases in _OUTPUT_FORMAT_DEFS.items():
 def parse_output_format(value: str) -> str:
     canonical = OUTPUT_FORMAT_ALIASES.get(value)
     if canonical is None:
+        # Keep help and argument parsing independent of torch/modifier imports.
+        from qlean.core.routes import validate_gptq_output_format
+
+        try:
+            validate_gptq_output_format(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
         supported = sorted(set(OUTPUT_FORMAT_ALIASES.values()))
         aliases = {v: [k for k, v2 in OUTPUT_FORMAT_ALIASES.items() if v2 == v] for v in supported}
         lines = [f"  {fmt}: {', '.join(a)}" for fmt, a in aliases.items()]
@@ -98,14 +111,18 @@ def _print_examples():
 """)
 
 def _print_formats():
-    """Print supported format conversions."""
+    """Print engine conversions plus the calibration-based GPTQ routes."""
     from qlean.core.auto_recipe import AUTO_CONVERSIONS
+    from qlean.core.routes import GPTQ_OUTPUT_PRESETS, MODIFIER_REPLACEMENT
     from collections import defaultdict
 
-    # Group by input format
-    conversions = defaultdict(list)
+    # Keep every engine conversion; add canonical GPTQ output names only.
+    conversions = defaultdict(set)
     for (inp, out) in AUTO_CONVERSIONS:
-        conversions[inp].append(out)
+        conversions[inp].add(out)
+    for inp, out in MODIFIER_REPLACEMENT:
+        if out in GPTQ_OUTPUT_PRESETS:
+            conversions[inp].add(OUTPUT_FORMAT_ALIASES[out])
 
     print("\nSupported conversions:\n")
     print(f"  {'Input':<10} {'Output Formats'}")
@@ -217,6 +234,38 @@ def _print_model_recipe(model_name: str):
         print("QLean will use an architecture-level or default recipe at runtime,")
         print("which may not be fully optimized for this model.\n")
 
+# Options whose argparse default is None so a model profile can supply the value
+# the reference torchrun script uses. An explicit user value always wins.
+_MODEL_OPTION_DEFAULTS = {
+    "cpu_offload_gb": 300.0,
+    "gptq_export_workers": 2,
+    "num_calibration_rounds": 1,
+    "calibration_padding": "none",
+}
+
+
+def _apply_model_defaults(args):
+    """Fill options the user did not pass, before the dataclasses validate them.
+
+    Must run before ``parse_to_dataclass``: these flags default to None so a model
+    profile can supply the reference script's value, and the dataclass validators
+    reject None (e.g. num_calibration_rounds must be a positive integer).
+    """
+    from qlean.models.pretrained.model_registry import resolve_model_defaults
+
+    log = logging.getLogger(__name__)
+    registered = resolve_model_defaults(
+        getattr(args, "model_name", None), getattr(args, "model_path", None)
+    )
+    for name, fallback in _MODEL_OPTION_DEFAULTS.items():
+        if getattr(args, name, None) is not None:
+            continue
+        value = registered.get(name, fallback)
+        setattr(args, name, value)
+        if name in registered:
+            log.info("Using %s=%r registered for %s", name, value, args.model_name)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="qlean",
@@ -295,19 +344,110 @@ def main():
              "omitted = follow recipe",
     )
 
-    # Hidden dataset arguments
-    options_group.add_argument(
-        "--dataset_name",
-        type=str,
-        required=False,
-        help=argparse.SUPPRESS,
+    calibration_group = parser.add_argument_group("Calibration Data (GPTQ)")
+    calibration_group.add_argument(
+        "--dataset_name", type=str, default=None, metavar="ID",
+        help="Hub dataset id for calibration (e.g. HuggingFaceH4/ultrachat_200k)",
     )
-    options_group.add_argument(
-        "--dataset_path",
-        type=str,
-        required=False,
-        help=argparse.SUPPRESS,
+    calibration_group.add_argument(
+        "--dataset_path", type=str, default=None, metavar="PATH",
+        help="Local dataset path for calibration",
     )
+    calibration_group.add_argument(
+        "--dataset_config", type=str, default=None, metavar="NAME",
+        help="Dataset config/subset (e.g. wikitext-2-raw-v1)",
+    )
+    calibration_group.add_argument(
+        "--dataset_split", type=str, default="train_sft", metavar="SPLIT",
+        help="Split to partition per rank (default: train_sft)",
+    )
+    calibration_group.add_argument(
+        "--num_calibration_samples", type=int, default=256, metavar="N",
+        help="Total calibration samples across all ranks (default: 256)",
+    )
+    calibration_group.add_argument(
+        "--max_sequence_length", type=int, default=2048, metavar="L",
+        help="Tokenization truncation length (default: 2048)",
+    )
+    calibration_group.add_argument(
+        "--calibration_padding", type=str, default=None, choices=["none", "max_length"],
+        metavar="MODE",
+        help="Tokenization padding: 'none' keeps ragged lengths, 'max_length' pads to "
+             "--max_sequence_length (default: none, or the model's registered default)",
+    )
+    calibration_group.add_argument(
+        "--batch_size", type=int, default=1, metavar="N",
+        help="Calibration batch size (default: 1)",
+    )
+    calibration_group.add_argument(
+        "--seed", type=int, default=42, help="Calibration shuffle seed (default: 42)",
+    )
+    calibration_group.add_argument(
+        "--messages_column", type=str, default="messages", metavar="COL",
+        help="Chat-messages column rendered via apply_chat_template (default: messages)",
+    )
+    calibration_group.add_argument(
+        "--text_column", type=str, default="text", metavar="COL",
+        help="Plain-text column used when no messages column exists (default: text)",
+    )
+
+    gptq_group = parser.add_argument_group("GPTQ Model Loading")
+    gptq_group.add_argument(
+        "--offload_folder", type=str, default=None, metavar="PATH",
+        help="Writable disk-offload directory; required for GPTQ and must remain "
+             "available through calibration and export",
+    )
+    gptq_group.add_argument(
+        "--device_map", type=str, default="auto_offload", metavar="MAP",
+        help="from_pretrained device_map (default: auto_offload)",
+    )
+    gptq_group.add_argument(
+        "--cpu_offload_gb", type=float, default=None, metavar="GB",
+        help="CPU offload budget in GB (default: 300, or the model's registered default)",
+    )
+    gptq_group.add_argument(
+        "--trust_remote_code", action=argparse.BooleanOptionalAction, default=True,
+        help="Allow custom checkpoint code (default: enabled; --no-trust_remote_code to disable)",
+    )
+    gptq_group.add_argument(
+        "--max_shard_size", type=str, default="10GB", metavar="SIZE",
+        help="Output shard size (default: 10GB)",
+    )
+    gptq_group.add_argument(
+        "--gptq_export_workers", type=int, default=None, metavar="N",
+        help="Threads for INT8/MXFP4 export (default: 2, or the model's registered default)",
+    )
+    gptq_group.add_argument(
+        "--gptq_int4_export_device", type=str, default="auto", metavar="DEV",
+        help="A8W4 packing device: auto|cpu|cuda[:N] (default: auto)",
+    )
+
+    dist_group = parser.add_argument_group("Distributed GPTQ")
+    dist_group.add_argument(
+        "--nproc_per_node", type=int, default=1, metavar="N",
+        help="Processes per node; >1 re-execs qlean under torchrun (default: 1)",
+    )
+    dist_group.add_argument(
+        "--nnodes", type=int, default=1, metavar="N", help="Node count (default: 1)",
+    )
+    dist_group.add_argument(
+        "--rdzv_endpoint", type=str, default=None, metavar="HOST:PORT",
+        help="Rendezvous endpoint for multi-node runs",
+    )
+    dist_group.add_argument(
+        "--max_restarts", type=int, default=0, metavar="N",
+        help="torchrun worker restarts; keep 0 for stateful quantization (default: 0)",
+    )
+    dist_group.add_argument(
+        "--num_calibration_rounds", type=int, default=None, metavar="N",
+        help="Split each layer's targets into N rounds to bound Hessian memory "
+             "(default: 1, or the model's registered default)",
+    )
+    dist_group.add_argument(
+        "--propagate_error", action=argparse.BooleanOptionalAction, default=True,
+        help="Re-forward quantized layers to propagate error (default: enabled)",
+    )
+
     options_group.add_argument(
         "--other_args",
         type=str,
@@ -373,7 +513,14 @@ def main():
     from qlean.utils import parse_to_dataclass
     from qlean.entrypoints import post_train
 
+    _apply_model_defaults(args)
     model_args, dataset_args, other_args = parse_to_dataclass(args)
+
+    from qlean.cli.launcher import launch_torchrun, needs_launch
+
+    if needs_launch(other_args):
+        raise SystemExit(launch_torchrun(other_args, sys.argv[1:]))
+
     post_train(model_args, dataset_args, other_args)
 
 if __name__ == "__main__":

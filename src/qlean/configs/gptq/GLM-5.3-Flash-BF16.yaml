@@ -1,0 +1,24 @@
+# GLM-5.3-Flash GPTQ recipe.
+# Mirrors the reference torchrun script glm53_flash_int8_group.py: grouped INT8
+# weights, static activation ordering, and the vision tower / attention / dense MLP
+# / shared experts / MoE gate / fused MQA projection kept BF16.
+# Loading uses Glm5NextForConditionalGeneration, selected from the model name by
+# qlean/models/pretrained/model_registry.py, which also registers this model's
+# 500GB CPU offload budget, two calibration rounds and eight export workers.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      targets:
+        - "Linear"
+      scheme: INT8_GROUP
+      dampening_frac: 0.001
+      actorder: static
+      offload_hessians: false
+      ignore:
+        - 're:.*visual.*'
+        - 'lm_head'
+        - 're:.*mlp\.gate$'
+        - 're:.*shared_experts\..*'
+        - 're:.*self_attn\..*'
+        - 're:.*mlp\.(down|gate|up)_proj$'
+        - 're:.*fused_qkv_a_proj_with_mqa'

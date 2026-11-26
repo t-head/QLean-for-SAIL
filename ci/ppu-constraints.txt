@@ -1,3 +1,6 @@
+# Core (data-free) PPU environment. GPTQ is not installed here: its extra needs
+# compressed-tensors>=0.18, which the ct 0.13 pin below predates.
+# GPTQ tests skip themselves via pytest.importorskip; see ci/gptq-constraints.txt.
 torch==2.13.0+v0.1.0.ppu2.2.0
 triton==3.7.0+v0.1.0.ppu2.2.0
 numpy==1.26.0

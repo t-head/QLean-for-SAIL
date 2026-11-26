@@ -3,29 +3,27 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
+from typing import List, Union
 
 from qlean.utils.custom_typing import PipelineFn
 
 
-def get_pipeline_from_modifiers(modifiers: List[str]) -> PipelineFn:
-    """Return the data-free pipeline; modifier-based selection is not implemented."""
+def is_gptq_modifier(modifier: object) -> bool:
+    """Recognize registered GPTQ instances without importing the GPTQ backend."""
+    from qlean.modifiers.factory import ModifierFactory
 
-    all_pipelines = get_pipelines(modifiers)
-
-    # Only the data-free pipeline is currently selected.
-    inferred = "datafree"
-
-    return all_pipelines[inferred]
+    gptq_class = ModifierFactory._main_registry.get("GPTQModifier")
+    return gptq_class is not None and isinstance(modifier, gptq_class)
 
 
-def get_pipelines(modifiers: List[str]) -> str:
-    """Return the available pipeline mapping; modifiers is currently unused."""
+def get_pipeline_from_modifiers(modifiers: List[Union[str, object]]) -> PipelineFn:
+    """Select sequential for GPTQ and retain datafree for all other modifiers."""
+    if any(
+        mod == "GPTQModifier" if isinstance(mod, str) else is_gptq_modifier(mod)
+        for mod in modifiers
+    ):
+        from qlean.pipelines.sequential import run_pipeline
+    else:
+        from qlean.pipelines.datafree import run_pipeline
 
-    from qlean.pipelines import (
-        datafree,
-    )
-
-    return {
-        "datafree": datafree.run_pipeline,
-    }
+    return run_pipeline

@@ -22,6 +22,16 @@ def post_train(
     logger.debug(f"other_args: {repr(other_args)}")
 
     compressor = QLeanCompressor(model_args)
-    if dataset_args.dataset_name is not None:
+    # Data-free conversions need no calibration data and must not enter this path
+    # (it would emit a spurious "no dataset" warning). GPTQ always enters it so it
+    # can build calibration data when the caller supplied none.
+    from qlean.core.gptq_workflow import is_gptq_output
+
+    if (
+        is_gptq_output(model_args)
+        or dataset_args.dataset_name is not None
+        or dataset_args.dataset_path is not None
+        or dataset_args.dataset is not None
+    ):
         compressor.set_calibration_dataset(dataset_args)
     compressor.post_train(other_args)

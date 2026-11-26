@@ -1,0 +1,30 @@
+# DeepSeek-V3.2 GPTQ recipe.
+# Mirrors the reference torchrun script deepseek_v32_int8.py (whose content is
+# MXFP4 despite the filename): only the routed experts are quantized, everything
+# else stays BF16. block_size is left at the modifier default of 128, as in the
+# script.
+# Loading uses qlean's own DeepseekV32ForCausalLM port. The model profile in
+# qlean/models/pretrained/model_registry.py merges inference/config_671B_v3.2.json
+# into config.json before loading, installs a fallback chat template, and
+# registers the 500GB CPU offload budget, two calibration rounds and max_length
+# padding that the script uses.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      targets:
+        - "Linear"
+      scheme: MXFP4
+      dampening_frac: 0.001
+      actorder: static
+      offload_hessians: false
+      ignore:
+        - 're:.*lm_head$'
+        - 're:.*block_sparse_moe\.gate$'
+        - 're:.*embed_tokens.*'
+        - 're:.*input_layernorm.*'
+        - 're:.*post_attention_layernorm.*'
+        - 're:.*mlp\.down_proj.*'
+        - 're:.*mlp\.up_proj.*'
+        - 're:.*mlp\.gate_proj.*'
+        - 're:.*self_attn.*'
+        - 're:.*shared_experts.*'

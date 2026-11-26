@@ -7,7 +7,7 @@ import math
 from abc import ABC, abstractmethod
 
 from qlean.core.state import State
-from qlean.core.event import Event
+from qlean.core.event import Event, EventType
 
 __all__ = ["Modifier"]
 
@@ -29,8 +29,31 @@ class Modifier(ABC):
         """Mark the modifier as started."""
         self.started_ = True
 
-    def on_event(self, state: State, event: Event):
+    def update_event(self, state: State, event: Event, **kwargs):
+        self.on_event(state, event, **kwargs)
+        callback = {
+            EventType.CALIBRATION_EPOCH_START: self.on_calibration_start,
+            EventType.SEQUENTIAL_EPOCH_START: self.on_sequential_epoch_start,
+            EventType.SEQUENTIAL_EPOCH_END: self.on_sequential_epoch_end,
+            EventType.CALIBRATION_EPOCH_END: self.on_calibration_end,
+        }.get(event.type_)
+        if callback is not None:
+            callback(state, event, **kwargs)
+
+    def on_event(self, state: State, event: Event, **kwargs):
         """Handle a pipeline event; the base implementation does nothing."""
+        pass
+
+    def on_calibration_start(self, state: State, event: Event, **kwargs):
+        pass
+
+    def on_sequential_epoch_start(self, state: State, event: Event, **kwargs):
+        pass
+
+    def on_sequential_epoch_end(self, state: State, event: Event, **kwargs):
+        pass
+
+    def on_calibration_end(self, state: State, event: Event, **kwargs):
         pass
 
     def on_end(self, state: State):

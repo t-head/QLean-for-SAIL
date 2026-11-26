@@ -1,0 +1,21 @@
+# Qwen3.5-397B-A17B GPTQ recipe.
+# ignore matches the reference torchrun script for this model. Loading uses
+# Qwen3_5MoeForConditionalGeneration plus the Qwen3.5 quirks in
+# qlean/models/pretrained/model_registry.py, selected from the model name.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      targets:
+        - "Linear"
+      scheme: INT8_CHANNEL
+      dampening_frac: 0.001
+      actorder: static
+      offload_hessians: false
+      ignore:
+        - 're:.*lm_head'
+        - 're:visual.*'
+        - 're:model.visual.*'
+        - 're:.*mlp.gate$'
+        - 're:.*embed_tokens$'
+        - 're:.*shared_expert_gate$'
+        - 're:.*linear_attn.*'

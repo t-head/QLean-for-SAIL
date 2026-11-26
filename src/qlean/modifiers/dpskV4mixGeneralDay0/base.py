@@ -16,7 +16,7 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
 )
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -94,7 +94,7 @@ class  dpskV4mixGeneralDay0Modifier(QuantizationMixin, Modifier):
                 is_linear_weight = param_name == "weight" and not module_name.endswith(
                     "norm"
                 )
-                is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
                 if is_ignored:
                     logger.debug(f"\nweight_name:{weight_name} is_ignored")
                     module_ignored.append(module_name)
@@ -157,7 +157,7 @@ class  dpskV4mixGeneralDay0Modifier(QuantizationMixin, Modifier):
                         new_weight_map[f"{weight_name}_scale"] = file_name
                         quant_count += 1
                     # Dense layers: only quantize layers in fp8_channelwise_layers
-                    elif any(_match_name(module_name, p) for p in self.fp8_channelwise_layers):
+                    elif any(match_name(module_name, p) for p in self.fp8_channelwise_layers):
                         assert weight.element_size() == 2
                         quant_weight, scale_inv = weight_quant(weight, "FP8_DYNAMIC")
                         new_state_dict[weight_name] = quant_weight

@@ -19,7 +19,7 @@ from compressed_tensors.quantization import (
 import torch
 from safetensors.torch import load_file, save_file
 
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -90,7 +90,7 @@ class nvfp4BasedMxfp4Day0Modifier(QuantizationMixin, Modifier):
                 is_linear_weight = param_name == "weight" and not module_name.endswith(
                     "norm"
                 )
-                is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
                 if is_ignored:
                     logger.debug(f"\nweight_name:{weight_name} is_ignored")
                     module_ignored.append(module_name)

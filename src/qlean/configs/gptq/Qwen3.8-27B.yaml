@@ -1,0 +1,23 @@
+# Qwen3.8-27B GPTQ recipe.
+# Mirrors the reference torchrun script qwen38_27b_mxfp4.py: MXFP4 weights, static
+# activation ordering, and the linear-attention / MTP / vision projections kept BF16.
+# Loading uses Qwen3_5ForConditionalGeneration, selected from the model name by
+# qlean/models/pretrained/model_registry.py.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      targets:
+        - "Linear"
+      scheme: MXFP4
+      block_size: 128
+      dampening_frac: 0.001
+      actorder: static
+      offload_hessians: false
+      ignore:
+        - 're:.*lm_head'
+        - 're:.*conv1d$'
+        - 're:.*in_proj_a$'
+        - 're:.*in_proj_b$'
+        - 're:.*mtp.*'
+        - 're:model\.visual\..*'
+        - 're:visual\..*'
