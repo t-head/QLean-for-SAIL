@@ -51,7 +51,7 @@ class EventLifecycle:
     @classmethod
     def event(cls, fn: Callable[[Any], Any]):
         """Wrap an event handler without additional validation."""
-        def validator(self: "EventMixin", event: Event):
+        def validator(self: "EventMixin", event: Event, **kwargs):
             pass
 
         return cls._wrap_with_validation(fn, validator)

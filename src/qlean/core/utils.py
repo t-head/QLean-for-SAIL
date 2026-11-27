@@ -4,19 +4,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys, os
+import copy
 import yaml, json
 import subprocess
 from glob import glob
-from typing import Dict, List, Tuple, Any
+from typing import List, Tuple
 from safetensors import safe_open
 from importlib.resources import files
 from pathlib import Path
 
 from qlean.args import ModelArguments
 from qlean.configs import load_env_rules
-from qlean.core.routes import MODIFIER_REPLACEMENT, RECIPE_DIR_MAP, SCHEME_MAP
+from qlean.core.routes import (
+    GPTQ_EXPERT_TARGET,
+    GPTQ_INT4_PRESETS,
+    GPTQ_OUTPUT_PRESETS,
+    GPTQ_WEIGHT_CONFIGS,
+    MODIFIER_REPLACEMENT,
+    RECIPE_DIR_MAP,
+    SCHEME_MAP,
+    validate_gptq_output_format,
+)
 from qlean.modifiers import ModifierFactory, Modifier
-from qlean.utils import get_checkpoint_files, is_weights_file
 
 import logging
 
@@ -279,10 +288,69 @@ def _detect_from_keys(keys) -> str | None:
         return "FP8"
     return None
 
+def apply_gptq_output_format(recipe_dict: dict, output_format: str) -> str | None:
+    """Rewrite an automatically resolved recipe; explicit user recipes bypass this."""
+    validate_gptq_output_format(output_format)
+    preset = GPTQ_OUTPUT_PRESETS.get(output_format)
+    if preset is None:
+        return None
+
+    replacement_weights = GPTQ_WEIGHT_CONFIGS[preset]
+    updated = 0
+
+    def visit(value):
+        nonlocal updated
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "GPTQModifier" and (child is None or isinstance(child, dict)):
+                    if child is None:
+                        # An empty `GPTQModifier:` body is a legal recipe spelling
+                        # (get_modifiers_from_dict treats None as {}). Materialize
+                        # it, otherwise the preset written below would be lost.
+                        child = {}
+                        value[key] = child
+                    config_groups = child.get("config_groups")
+                    if isinstance(config_groups, dict) and config_groups:
+                        child.pop("scheme", None)
+                        for config_group in config_groups.values():
+                            if isinstance(config_group, dict):
+                                weights = config_group.get("weights") or {}
+                                replacement = copy.deepcopy(replacement_weights)
+                                if "actorder" in weights:
+                                    replacement["actorder"] = weights["actorder"]
+                                config_group["weights"] = replacement
+                                config_group.pop("input_activations", None)
+                                config_group.pop("output_activations", None)
+                                updated += 1
+                    else:
+                        child.pop("config_groups", None)
+                        child["scheme"] = preset
+                        if preset in GPTQ_INT4_PRESETS:
+                            child["targets"] = [GPTQ_EXPERT_TARGET]
+                        else:
+                            child.setdefault("targets", ["Linear"])
+                        updated += 1
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(recipe_dict)
+    if updated == 0:
+        raise ValueError(
+            f"GPTQ output format '{output_format}' requires a GPTQModifier recipe"
+        )
+
+    logger.info("Applied GPTQ preset %s to %d config group(s)", preset, updated)
+    return preset
+
 def resolve_recipe(output_format: str, model_name: str, model_path: str) -> Path | None:
+    """Match model/architecture recipes, then the GPTQ-only packaged default.
+
+    None allows non-GPTQ callers to generate a GeneralQuantEngine recipe.
     """
-    Resolve a recipe by model name, then by architecture; None means no match.
-    """
+    validate_gptq_output_format(output_format)
     recipe_dir = RECIPE_DIR_MAP.get(output_format)
     if recipe_dir is None:
         raise ValueError(f"No recipe directory configured for output format '{output_format}'")
@@ -304,7 +372,15 @@ def resolve_recipe(output_format: str, model_name: str, model_path: str) -> Path
             logger.info(f"Matched architecture recipe: {arch_recipe} (arch={arch})")
             return arch_recipe
 
-    # Level 3: no match, let the caller fall back
+    # GPTQ is not supported by the engine-generated fallback.
+    if output_format in GPTQ_OUTPUT_PRESETS:
+        default = base / "_arch" / "default.yaml"
+        if default.is_file():
+            logger.info(f"Using default GPTQ recipe: {default}")
+            return default
+        raise ValueError(f"No GPTQ default recipe found: {default}")
+
+    # Non-GPTQ formats keep the GeneralQuantEngine-generated fallback.
     return None
 
 def _get_architecture(model_path: str) -> str | None:
@@ -332,6 +408,9 @@ def _get_architecture(model_path: str) -> str | None:
 def get_modifiers_from_recipe(
     name: str, model_args: ModelArguments
 ) -> Tuple[List["Modifier"], dict]:
+    # Callers may pass a minimal args object without output_format (data-free recipe
+    # routing); None is a no-op for the GPTQ format validation.
+    validate_gptq_output_format(getattr(model_args, "output_format", None))
     from qlean.modifiers import ModifierFactory
 
     if name != "day0":
@@ -444,16 +523,19 @@ def get_modifiers_from_recipe(
             recipe_dict = yaml.safe_load(file)
             logger.debug(f"content in yaml: {str(recipe_dict)}")
 
+        if not isinstance(recipe_dict, dict):
+            raise ValueError(f"Cannot parse recipe {recipe}")
+
+        gptq_preset = apply_gptq_output_format(recipe_dict, output_format)
         # Apply the scheme override
-        scheme_value = SCHEME_MAP.get(output_format)
-        if scheme_value:
+        scheme_value = gptq_preset or SCHEME_MAP.get(output_format)
+        if gptq_preset is not None:
+            logger.info(f"Applied GPTQ preset: {gptq_preset}")
+        elif scheme_value:
             update_scheme(recipe_dict, scheme_value)
             logger.info(f"Applied scheme: {scheme_value}")
         else:
             logger.info("Using default scheme from recipe")
-
-        if not isinstance(recipe_dict, dict):
-            raise ValueError(f"Cannot parse recipe {recipe}")
 
         if output_format == "BF16":
             _retarget_recipe_to_bf16(recipe_dict, input_format, recipe)
@@ -509,6 +591,7 @@ def get_modifiers_from_dict(recipe_dict: dict) -> List[Modifier]:
 def get_modifiers_from_dict_day0(
     input_format: str, output_format: str, recipe_dict: dict
 ) -> List[Modifier]:
+    validate_gptq_output_format(output_format)
     route_key = (input_format, output_format)
     replacement = MODIFIER_REPLACEMENT[route_key]
 

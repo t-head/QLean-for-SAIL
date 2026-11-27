@@ -27,6 +27,12 @@ class ModifierFactory:
     _main_registry: Dict[str, Type[Modifier]] = {}
     _errors: Dict[str, Exception] = {}
 
+    # Backends shipped as optional extras. Their absence must not keep the core
+    # factory unloaded, otherwise every data-free run re-scans the whole package.
+    _OPTIONAL_PREFIXES = ("qlean.modifiers.gptq",)
+    _OPTIONAL_MODIFIERS = {"GPTQModifier": "qlean.modifiers.gptq"}
+    _optional_errors: Dict[str, Exception] = {}
+
     @staticmethod
     def load_from_package(package_path: str = _MAIN_PACKAGE_PATH):
         """Import modifiers for registration; the default scans legacy and engine packages."""
@@ -55,8 +61,14 @@ class ModifierFactory:
                 try:
                     module = importlib.import_module(modname)
                 except Exception as module_err:
-                    logger.warning(f"Failed to load module {modname}: {module_err}")
-                    all_succeed = False
+                    if modname.startswith(ModifierFactory._OPTIONAL_PREFIXES):
+                        logger.info(
+                            f"Optional module {modname} unavailable: {module_err}"
+                        )
+                        ModifierFactory._optional_errors[modname] = module_err
+                    else:
+                        logger.warning(f"Failed to load module {modname}: {module_err}")
+                        all_succeed = False
 
         if all_succeed:
             ModifierFactory._loaded = True
@@ -91,5 +103,27 @@ class ModifierFactory:
 
         if modifiertype in ModifierFactory._main_registry:
             return ModifierFactory._main_registry[modifiertype](**kwargs)
+
+        if modifiertype in ModifierFactory._OPTIONAL_MODIFIERS:
+            from qlean.utils.optional import require_gptq
+
+            # Raises ImportError with the `qlean[gptq]` install hint when the
+            # optional backend is missing; falls through if deps are present.
+            require_gptq()
+
+            package = ModifierFactory._OPTIONAL_MODIFIERS[modifiertype]
+            load_errors = {
+                module: error
+                for module, error in ModifierFactory._optional_errors.items()
+                if module.startswith(package)
+            }
+            if load_errors:
+                details = "; ".join(
+                    f"{module}: {error}" for module, error in load_errors.items()
+                )
+                raise ImportError(
+                    f"Optional modifier {modifiertype!r} failed to load from "
+                    f"{package!r}: {details}"
+                )
 
         raise ValueError(f"No modifier of type {modifiertype} found")

@@ -16,7 +16,7 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
 )
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -98,7 +98,7 @@ class fp8BasedDay0Modifier(QuantizationMixin, Modifier):
                 is_ignored = False
                 if "." in weight_name:
                     module_name = weight_name.rsplit(".", 1)[0]
-                    is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                    is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
                     if is_ignored and has_scale:
                         logger.debug(f"\nweight_name:{weight_name} is skipping scale")
                         skipped_scales += 1

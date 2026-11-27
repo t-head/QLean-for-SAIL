@@ -20,3 +20,49 @@ LICENSES/MIT.txt:
 
 Copyright 2018-2020 Philippe Tillet
 Copyright 2020-2022 OpenAI
+
+This product contains third-party source code from the DeepSeek-V3.2-Exp project:
+https://github.com/deepseek-ai/DeepSeek-V3.2-Exp
+
+The following files are copied from DeepSeek-V3.2-Exp and are covered by the MIT
+License. A copy of the License is included in LICENSES/MIT.txt:
+
+- src/qlean/modeling/deepseekv32/config.py
+- src/qlean/modeling/deepseekv32/kernel.py
+- src/qlean/modeling/deepseekv32/model.py
+
+Copyright (c) 2025 DeepSeek
+
+This product contains third-party source code from llm-compressor:
+https://github.com/vllm-project/llm-compressor
+
+The following files are ported from llm-compressor and are covered by the Apache
+License, Version 2.0 included in LICENSE:
+
+- src/qlean/modeling/moe/context.py
+- src/qlean/modeling/moe/conversion_mappings.py
+- src/qlean/modeling/moe/granitemoe.py
+- src/qlean/modeling/moe/helpers.py
+- src/qlean/modeling/moe/linear_experts.py
+- src/qlean/modeling/moe/linearize.py
+- src/qlean/modeling/moe/llama4.py
+- src/qlean/modifiers/gptq/base.py
+- src/qlean/modifiers/gptq/gptq_quantize.py
+- src/qlean/modifiers/quantization.py
+- src/qlean/pipelines/sequential/pipeline.py
+- src/qlean/utils/dev.py
+
+The gptq_quantize.py port rewrites the Hessian accumulation as the mathematically
+equivalent addmm_(inp, inp.t(), beta=1, alpha=2) form and adds copy_hessian.
+The dev.py port combines llmcompressor/utils/dev.py,
+llmcompressor/utils/compressed_tensors_utils.py (suspend_distributed_timeout) and
+llmcompressor/datasets/utils.py (get_rank_partition); temporary_offload_folder is
+a qlean implementation with no upstream counterpart.
+
+Upstream author: The vLLM Project.
+The upstream llm-compressor NOTICE carries the following attribution, reproduced
+here as required by section 4(d) of the Apache License, Version 2.0:
+
+    LLM Compressor
+    This product includes software developed in association with the vLLM
+    Project (https://github.com/vllm-project).

@@ -16,7 +16,7 @@ from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationScheme,
 )
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -99,7 +99,7 @@ class generalDay0Modifier(QuantizationMixin, Modifier):
                 is_linear_weight = param_name == "weight" and not module_name.endswith(
                     "norm"
                 )
-                is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
                 if is_ignored:
                     logger.debug(f"\nweight_name:{weight_name} is_ignored")
                     module_ignored.append(module_name)
@@ -147,11 +147,11 @@ class generalDay0Modifier(QuantizationMixin, Modifier):
                     has_mxfp4 = bool(self.mxfp4_layers)
 
                      # determine quantization target
-                    if any(_match_name(module_name, p) for p in self.fp8_blockwise_layers):
+                    if any(match_name(module_name, p) for p in self.fp8_blockwise_layers):
                         target = "FP8_BLOCK"
-                    elif any(_match_name(module_name, p) for p in self.fp8_channelwise_layers):
+                    elif any(match_name(module_name, p) for p in self.fp8_channelwise_layers):
                         target = "FP8_DYNAMIC"
-                    elif any(_match_name(module_name, p) for p in self.mxfp4_layers):
+                    elif any(match_name(module_name, p) for p in self.mxfp4_layers):
                         target = "MXFP4"
                     elif not has_mxfp4:
                         target = "MXFP4"

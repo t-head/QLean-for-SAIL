@@ -34,7 +34,9 @@ setup(
         "huggingface-hub>=0.34,<3",
         "safetensors>=0.5.0,<1",
         "pydantic>=2.4,<3",
-        "compressed-tensors>=0.13,<0.14",
+        # 0.13 is the data-free baseline; the optional "gptq" extra narrows this to
+        # 0.18. The upper bound must stay above 0.18 or the extra cannot resolve.
+        "compressed-tensors>=0.13,<0.19",
     ],
     extras_require={
         "dev": [
@@ -51,6 +53,17 @@ setup(
         ],
         # hadamard rotation (MXFP4 + rotation=hadamard) needs scipy
         "rotation": ["scipy>=1.11.4,<2"],
+        # Calibration-based GPTQ. Narrower floors than the core install: it needs
+        # the compressed-tensors offload/distributed subpackages (0.18+, which in
+        # turn requires torch>=2.10) and transformers v5 weight-conversion APIs.
+        "gptq": [
+            "compressed-tensors>=0.18,<0.19",
+            "torch>=2.10,<2.14",
+            "transformers>=5.15,<6",
+            "accelerate>=1.1.0,<2",
+            "loguru>=0.7,<1",
+            "datasets>=2.0,<5",
+        ],
     },
     entry_points={
         "console_scripts": [

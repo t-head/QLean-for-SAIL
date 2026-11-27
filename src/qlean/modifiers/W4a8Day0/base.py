@@ -10,7 +10,7 @@ from safetensors.torch import load_file, save_file
 import json
 from tqdm import tqdm
 
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -87,7 +87,7 @@ class W4a8Day0Modifier(QuantizationMixin, Modifier):
                 is_linear_weight = param_name == "weight" and not module_name.endswith(
                     "norm"
                 )
-                is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
                 if is_ignored:
                     logger.debug(f"\nweight_name:{weight_name} is_ignored")
                     module_ignored.append(module_name)
@@ -151,7 +151,7 @@ class W4a8Day0Modifier(QuantizationMixin, Modifier):
 
         # update config.json
         for i in range(len(module_ignored) - 1, -1, -1):
-            if _match_name("model.embed_tokens", module_ignored[i]):
+            if match_name("model.embed_tokens", module_ignored[i]):
                 logger.debug(f"ignore list pop {module_ignored[i]}")
                 module_ignored.pop(i)
 

@@ -258,9 +258,13 @@ def worker(args):
                 multi = item.get_closest_marker('multi_gpu') is not None
                 if multi and not gpu:
                     data['audit_errors'].append('multi_gpu requires the gpu marker: ' + item.nodeid)
-                choose = (args.suite == 'cpu' and cpu
-                          or args.suite == 'ppu' and gpu and not multi
-                          or args.suite == 'ppu-dual' and gpu and multi)
+                gptq = item.get_closest_marker('gptq') is not None
+                if args.suite == 'gptq':
+                    choose = gptq
+                else:
+                    choose = (args.suite == 'cpu' and cpu
+                              or args.suite == 'ppu' and gpu and not multi
+                              or args.suite == 'ppu-dual' and gpu and multi) and not gptq
                 (chosen if choose else excluded).append(item)
             data['expected_selected'] = [i.nodeid for i in chosen]
             data['expected_deselected'] = [i.nodeid for i in excluded]
@@ -297,6 +301,24 @@ def worker(args):
         (require_dual_card if args.suite == 'ppu-dual' else require_single_card)(count)
         data['hardware'] = [str(torch.cuda.get_device_properties(i)) for i in range(count)]
         options.append('--require-gpu')
+    if args.suite == 'gptq':
+        constraints = ROOT / 'ci/gptq-constraints.txt'
+        data['dependency_versions'] = {}
+        for line in constraints.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            name, required = line.strip().split('==')
+            actual = metadata.version(name)
+            data['dependency_versions'][name] = actual
+            if actual != required:
+                raise RuntimeError(f'GPTQ dependency mismatch: {name}={actual}; required {required}')
+        # Unpinned members of the gptq extra. Missing ones would make tests skip,
+        # which the audit rejects, so require them up front instead.
+        for name in ('accelerate', 'loguru', 'datasets'):
+            try:
+                metadata.version(name)
+            except metadata.PackageNotFoundError:
+                raise RuntimeError(f'GPTQ suite requires {name}; install qlean[gptq]')
     data['pytest_exitcode'] = int(pytest.main(options, plugins=[Audit()]))
     data['audit_errors'].extend(execution_errors(data))
     data['source_manifest_after'] = source_manifest(ROOT)
@@ -321,9 +343,9 @@ def worker(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run audited full CPU, single-device PPU, or minimal dual-device PPU tests.')
+    parser = argparse.ArgumentParser(description='Run audited full CPU, single-device PPU, minimal dual-device PPU, or GPTQ tests, or verify an existing report.')
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--suite', choices=['cpu', 'ppu', 'ppu-dual'])
+    mode.add_argument('--suite', choices=['cpu', 'ppu', 'ppu-dual', 'gptq'])
     mode.add_argument('--verify-report', type=Path)
     parser.add_argument('--source-root', type=Path, default=ROOT)
     parser.add_argument('--package-root', type=Path)
@@ -368,8 +390,9 @@ def main():
     start = time.monotonic()
     with (args.output / 'pytest.log').open('w') as log:
         try:
+            timeout = 3600 if args.suite == 'gptq' else 900
             with managed_process(command, cwd=args.output, env=env, stdout=log, stderr=subprocess.STDOUT) as proc:
-                code = proc.wait(timeout=900)
+                code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             code = 124
     save(args.output / 'execution.json', dict(command=command, returncode=code, cwd=str(args.output),

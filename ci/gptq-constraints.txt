@@ -1,0 +1,28 @@
+# GPTQ environment: `pip install -e ".[gptq]" -c ci/gptq-constraints.txt`.
+# Separate from ci/ppu-constraints.txt because compressed-tensors 0.18 requires
+# torch>=2.10, which the PPU torch 2.9.0 build predates.
+#
+# Pinned to the PPU container actually used to validate the GPTQ suite
+# (16x PPU-ZW810E, Python 3.12, torch 2.11.0 PPU image). triton carries the PPU
+# local version label.
+#
+# transformers / tokenizers / pyarrow / compressed-tensors are pinned because a
+# PPU image can ship versions that import fine yet break GPTQ: transformers
+# 5.12.1 has no `reverse` parameter on rename_source_key() and no
+# conversion_mapping.USER_REGISTERED_MAPPINGS, and pyarrow 26 requires numpy>=2
+# so datasets cannot load calibration data at all. Where the image disagrees,
+# carry these four in an isolated --system-site-packages venv and leave
+# torch/triton as the image's PPU builds.
+# accelerate / loguru / datasets resolve from the "gptq" extra and are not pinned.
+torch==2.11.0
+triton==3.6.0+git84826637
+transformers==5.16.1
+tokenizers==0.23.2
+compressed-tensors==0.18.0
+pyarrow==24.0.0
+numpy==1.26.4
+huggingface-hub==1.15.0
+safetensors==0.8.0
+pydantic==2.13.4
+PyYAML==6.0.2
+pytest==7.2.0

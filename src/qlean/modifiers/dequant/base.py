@@ -19,7 +19,7 @@ import triton
 import triton.language as tl
 from triton import Config
 
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory
 from qlean.modifiers import QuantizationMixin
@@ -147,7 +147,7 @@ class dequantModifier(QuantizationMixin, Modifier):
 
                     # Derive module_name for ignore matching
                     module_name = weight_name.rsplit(".", 1)[0] if "." in weight_name else weight_name
-                    is_ignored = any(_match_name(module_name, ign) for ign in self.ignore)
+                    is_ignored = any(match_name(module_name, ign) for ign in self.ignore)
 
                     if weight.element_size() == 1 and weight.dtype == torch.float8_e4m3fn:  # FP8 weight
                         if is_ignored:

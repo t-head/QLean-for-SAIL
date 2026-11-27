@@ -1,0 +1,20 @@
+# GLM-5.2 GPTQ recipe.
+# ignore matches the reference torchrun script for this model: the first three
+# decoder layers, attention, the indexer projection and the MoE gate stay BF16.
+quant_stage:
+  quant_modifiers:
+    GPTQModifier:
+      targets:
+        - "Linear"
+      scheme: MXFP4
+      block_size: 32
+      dampening_frac: 0.001
+      actorder: static
+      offload_hessians: false
+      ignore:
+        - 're:^model\.layers\.[0-2]\..*'
+        - 're:.*mlp\.gate.*'
+        - 're:.*indexer\.weights_proj$'
+        - 'lm_head'
+        - 're:.*self_attn.*'
+        - 're:.*eh_proj$'

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from pydantic import Field
 
-from compressed_tensors.utils.match import _match_name
+from qlean.utils.ct_compat import match_name
 
 from qlean.modifiers import Modifier, ModifierFactory, QuantizationMixin
 from qlean.modifiers.utils import validate_scheme, ensure_scales_in_weight_map
@@ -315,7 +315,7 @@ class GeneralQuantEngineModifier(EngineModifierMixin, QuantizationMixin, Modifie
 
         ignore_patterns = []
         for m in bf16_unq:
-            if (not _match_name("model.embed_tokens", m)
+            if (not match_name("model.embed_tokens", m)
                     and m not in ignore_patterns):
                 ignore_patterns.append(m)
 

@@ -104,6 +104,39 @@ def assert_tensor_equal():
 
 
 @pytest.fixture
+def assert_mxfp4_payload_reconstructs():
+    """Decode the GPTQ MXFP4 producer contract and bound its reconstruction error.
+
+    MXFP4 export writes quant_method="mxfp4" with no config_groups/format, so the
+    standard HF loader cannot attach a scheme and would read the packed bytes as a
+    dense weight. Verify the payload with the project's own decoder instead. A
+    degenerate E8M0 scale (every byte 127) reconstructs orders of magnitude off:
+    the tiny-llama GPTQ fixture measures ~0.14 relative error, a degenerate scale ~113.
+    """
+    def check(tensors, original_state, dense_keys, *, max_rel_error=0.25):
+        import torch
+        from qlean.utils.bound_check import dequantize_mxfp4
+
+        errors = {}
+        for name in sorted(dense_keys):
+            reference = original_state[name].float()
+            rebuilt = dequantize_mxfp4(tensors[name], tensors[f"{name}_scale"])
+            assert rebuilt.shape == reference.shape, name
+            assert torch.isfinite(rebuilt).all(), name
+            errors[name] = ((rebuilt - reference).norm()
+                            / reference.norm().clamp_min(1e-12)).item()
+        # GPTQ compensates accumulated error, so weights legitimately deviate beyond
+        # the per-element RTN bound that compute_bound_check enforces; bound the
+        # aggregate relative error instead.
+        worst = max(errors.values())
+        assert worst < max_rel_error, (
+            f"MXFP4 relative reconstruction error {worst:.4f} >= {max_rel_error}: {errors}"
+        )
+
+    return check
+
+
+@pytest.fixture
 def tensor_factory():
     """Build tensors with local CPU RNG and strict size checks, then move devices."""
     import torch
